@@ -1,0 +1,126 @@
+---
+title: "Practical Machine Learning Project"
+author: "Praveen Dua"
+date: "September 23, 2015"
+output: html_document
+---
+
+```{r, echo=FALSE}
+require(caret);
+```
+## Overview
+
+We will analyze the dataset for an activity (barbell lifts) performed correctly and incorrectly, and attemp to make a model to be able to classify the activity from the various sensors measurements : accelerometers, gyros, magnetometers, etc...
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. I greatly appreciate this data being made available freely. If you use this data for any purposes, please do cite the source and acknowledge the team.
+
+## Load and preprocess the training dataset 
+
+In any modeling and analysis exercise, a critical step is to perform a thorough preprocessing of the data to be used for model input. Its importance can't be stressed enough - poor quality and unnecessary input data not only slows down the model training, it can actually add noise to the model's prediction capability if too many irrelevant predictors are input.
+
+For this reason, we make an effort to assess the predictors have meaningful variation and are independent via the following steps :
+
+ * We save the actual 'classe' output in a separate dataframe 'y' and leave only the predictors in the 'testing' dataframe
+ * We drop the variables like timestamps, num_window, user_name, X, etc... as these are merely informational parameters about the dataset and collection methodology and are not expected to be predictors of activity class.
+
+
+```{r}
+set.seed(10);
+training <- read.csv("pml-training.csv");
+y <- training$classe;
+training <- training[,-c(1:7,ncol(training))];
+holedensity <- sum(is.na(training))/(nrow(training)*ncol(training));
+uniquevals <- sapply(training, function (x) {length(unique(x))});
+numredundantcols <- length(which(uniquevals < 2));
+nrowtrain <- nrow(training);
+nafractrain <- sapply(training, function (x) {sum(is.na(x))/nrowtrain});
+training <- training[,-which(nafractrain > 0.9)];
+newholedensity <- sum(is.na(training))/(nrow(training)*ncol(training));
+nzv <- nearZeroVar(training, saveMetrics = TRUE);
+if (sum(nzv$nzv) > 0) training <- training[,-which(nzv$nzv)];
+if (sum(nzv$zeroVar) > 0) training <- training[,-which(nzv$zeroVar)];
+mycorr <- cor(training);
+hicorr <- findCorrelation(mycorr, cutoff = 0.75);
+if (length(hicorr) > 0) training <- training[,-hicorr];
+comboinfo <- findLinearCombos(training);
+if (length(comboinfo$remove) > 0) training <- training[,-comboinfo$remove];
+excludeFactorsFromCSPreProcess <- sapply(training, function (y) is(y,"factor"));
+trainPP <- training;
+```
+
+* We look at the prevalence of 'na' values in the dataset with holedensity = `r sprintf("%03.3f", holedensity)`. This is rather high. If too many 'na' values are observed then we need to take appropriate mitigation steps :
+    + if specific columns are empty, we remove them
+    + if 'na' values are evenly distributed throughout, then imputation may be a better approach
+  
+* If some columns have very few unique values, they are not likely to be very useful predictors. After removing the columns with > 90% values as 'na', we find that the fraction of 'na' values in the remaining predictors newholedensity = `r sprintf("%03.3f", newholedensity)`. Since this value is fairly low, we will skip imputing for this dataset.
+
+* Next we look for columns with Zero-Variance or near-Zero-Variance, and eliminate them. We find `r sum(nzv$zeroVar)` columns with Zero-Variance and `r sum(nzv$nzv)` columns with near-Zero-Variance.
+
+* We now eliminate any predictors that are linear combinations of other predictors. It may be unlikely for the dataset at hand with a large number of rows, but this step is important for completeness during preprocessing stage as some models benefit greatly from having independent predictors.
+
+* Next we need to center and scale the predictors. For this, we can use the preprocess function from caret ackage. Only the columns of 'numerical' type can be scaled and centered, which means the factor variables need to be excluded from this step. [We will also need to exclude these columns from the testing dataset for centering and scaling]
+
+## Model Fitting
+
+Now that we have the preprocessed dataset with only the meaningful predictors left, We start the process of model fitting. First step is to split the dataset into a training and test (cross-validation) datasets. We make use of the 'createDataPartition' function to accomplish this.
+
+***Note : Instead of having to run the 'train' function each time this markdown document is rendered, i have fitted the model in console and saved it to an RDS file, which is imported in this markdown document.***
+
+We selected a random forest model to try first as it is known to have a good balance of bias-vs-variance for such classification problems and offers a good measure of stability with reasonably short run times.
+
+``` {r}
+set.seed(10);
+inTrain <- createDataPartition(y, p=0.75, list=FALSE);
+trainSSraw <- trainPP[inTrain,];
+testSSraw <- trainPP[-inTrain,];
+ytrain <- y[inTrain];
+ytest <- y[-inTrain];
+preprocTrain <- preProcess(trainSSraw[!excludeFactorsFromCSPreProcess], method=c("center", "scale"));
+trainSS <- trainSSraw;
+trainSS[!excludeFactorsFromCSPreProcess] <- predict(preprocTrain, newdata = trainSSraw[!excludeFactorsFromCSPreProcess]);
+# system.time(model2 <- train(ytrain ~ ., data=trainSS, method="rf"));
+model2 <- readRDS("model2.rds");
+predTrainSS <- predict(model2, trainSS);
+confusionMatrix(predTrainSS, ytrain);
+```
+
+As can be seen from the ConfusionMatrix for the training set above, the accuracies is at 100 % for the training set. This is really good as it indicates that the model used can account for the training dataset completely.
+
+However, we need to make sure this model does not suffer from high variance and that it generalizes well. To assess this, we estimate the out of sample error estimate next.
+
+## Out-of-Sample Error
+
+Out of sample error estimate of the model is obtained by using this model to test the accuracy metrics of predictions for the cross-validation set. We had saved ~25% data to use for testing purpose. 
+
+
+
+``` {r}
+testSS <- testSSraw;
+testSS[!excludeFactorsFromCSPreProcess] <- predict(preprocTrain, newdata = testSSraw[!excludeFactorsFromCSPreProcess]);
+predTestSS <- predict(model2, testSS);
+confusionMatrix(predTestSS, ytest);
+```
+
+As can be observed from the confusion matrix above for the CV dataset, the accuracy of the model is at 98.96 %
+
+This gives us good confidence that the model works sufficiently robustly on the cross validation set and thus, is likely to generalize well. 
+
+## Predicting Final Test Set
+
+We will now attempt to predict the activities for the final test set.
+
+``` {r}
+set.seed(10);
+finaltesting <- read.csv("pml-testing.csv");
+predictors <- names(trainPP);
+finaltestingpred <- finaltesting[,predictors];
+finaltestPP <- finaltestingpred;
+finaltestPP[!excludeFactorsFromCSPreProcess] <- predict(preprocTrain, newdata = finaltestingpred[!excludeFactorsFromCSPreProcess]);
+finaloutput20 <- predict(model2, newdata = finaltestPP);
+finaloutput20
+```
+
+
+
+
+
